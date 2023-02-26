@@ -21,26 +21,62 @@ void updateLEDs()
     //nimble.updateNetworkLEDs();
 }
 
-const char* filenames[] = {
-    "/1-slowbj-7m.funscript",
-    "/7-crazy-10m.funscript",
-    "/2-strokes-20m.funscript",
-    "/3-smooth-20m.funscript",
-    "/4-intense-20m.funscript",
-    "/5-invert-20m.funscript",
-    "/6-topbot-20m.funscript"
-};
-short numFilenames = sizeof(filenames) / sizeof(const char*);
+const unsigned MAX_FILES = 10;
+String filenames[MAX_FILES] = {};
+short numFiles = 0;
 short fileIndex = 0;
 
-const char* nextFile() {
+String nextFile() {
     short i = fileIndex;
     fileIndex++;
-    if (fileIndex >= numFilenames) {
+    if (fileIndex >= numFiles) {
         fileIndex = 0;
     }
     //Serial.printf("File index: %d, Next: %d, Size: %d\n", i, fileIndex, numFilenames);
     return filenames[i];
+}
+
+void sortFilenames()
+{
+    if (numFiles <= 1) return;
+    for (int i = 0; i < numFiles; i++) {
+        for (int j = i + 1; j < numFiles; j++) {
+            if (filenames[j] < filenames[i]) {
+                String q = filenames[i];
+                filenames[i] = filenames[j];
+                filenames[j] = q;
+            }
+        }
+    }
+}
+
+void getFunscriptFiles(fs::FS &fs) {
+    Serial.println("Listing dir: /");
+    File root = fs.open("/");
+    if (!root) {
+        Serial.println("Error: failed to open dir");
+        return;
+    }
+    if (!root.isDirectory()) {
+        Serial.println("Error: not a directory");
+        return;
+    }
+    File file = root.openNextFile();
+    while (file)
+    {
+        if (!file.isDirectory() && numFiles < MAX_FILES) {
+            String filename = "/" + String(file.name());
+            if (filename.endsWith(".funscript")) {
+                filenames[numFiles++] = filename;
+                Serial.print(" FILE : ");
+                Serial.print(file.name());
+                Serial.print("\t SIZE: ");
+                Serial.println(file.size());
+            }
+        }
+        file = root.openNextFile();
+    }
+    sortFilenames();
 }
 
 void pressHandler(BfButton *btn, BfButton::press_pattern_t pattern)
@@ -52,7 +88,7 @@ void pressHandler(BfButton *btn, BfButton::press_pattern_t pattern)
         break;
 
     case BfButton::DOUBLE_PRESS:
-        nimble.initFunscriptFile(SPIFFS, nextFile());
+        nimble.initFunscriptFile(SPIFFS, nextFile().c_str());
         nimble.start();
         break;
 
@@ -70,7 +106,7 @@ void setup()
     if (!SPIFFS.begin(true)) {
         Serial.println("An error occurred while mounting SPIFFS");
     }
-    listDir(SPIFFS, "/", 0);
+    getFunscriptFiles(SPIFFS);
     Serial.println("Ready.");
 
     btn.onPress(pressHandler)
