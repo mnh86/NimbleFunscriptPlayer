@@ -17,18 +17,43 @@ struct nimbleFrameState {
     int16_t vibrationPos = 0; // next vibration position
 };
 
-struct Keyframe {
-    short pos = 50;
-    int at = 0;
+class Keyframe {
+    public:
+        Keyframe(int at = 0, short pos = 50) { set(at, pos); }
+        ~Keyframe() {};
+
+        void set(int at, short pos) {
+            _at = at;
+            _pos = pos;
+        }
+        void copy(Keyframe k) {
+            set(k.at(), k.pos());
+        }
+        short lerpToPos(int t, Keyframe k) {
+            return map(t, at(), k.at(), pos(), k.pos());
+        }
+        bool equal(Keyframe k) {
+            return (at() == k.at() || pos() == k.pos());
+        }
+
+        int at() { return _at; }
+        short pos() { return _pos; }
+
+    private:
+        short _pos = 50;
+        int _at = 0;
 };
 
 class NimbleFunscript {
     public:
-        NimbleFunscript() {}
+        NimbleFunscript() {
+            jsonFilter["at"] = true;
+            jsonFilter["pos"] = true;
+        }
         ~NimbleFunscript() { reset(); }
         void init();
         void start();
-        void stop() { running = false; }
+        void stop();
         void toggle() { if (isRunning()) stop(); else start(); }
         bool isRunning() { return running; }
         void initFunscriptFile(fs::FS &fs, const char *path);
@@ -49,8 +74,7 @@ class NimbleFunscript {
         nimbleFrameState frame;
         Keyframe currentKeyframe;
         Keyframe nextKeyframe;
-        CircularBuffer<short,100> posBuffer;
-        CircularBuffer<int,100> atBuffer;
+        CircularBuffer<Keyframe*, 100> keyBuffer;
         long startTime;
 
         StaticJsonDocument<64> jsonFilter;
@@ -66,24 +90,30 @@ class NimbleFunscript {
 void NimbleFunscript::init()
 {
     initNimbleConModule();
-    jsonFilter["at"] = true;
-    jsonFilter["pos"] = true;
-    currentKeyframe.at = nextKeyframe.at = 0;
-    currentKeyframe.pos = nextKeyframe.pos = 50;
+    currentKeyframe.set(50, 0);
+    nextKeyframe.set(50, 0);
 }
 
 void NimbleFunscript::reset()
 {
     currentFile.close();
-    posBuffer.clear();
-    atBuffer.clear();
-    endOfActions = false;
+    keyBuffer.clear();
+    endOfActions = true;
+    vibrationAmplitude = 0;
+    currentKeyframe.set(50, 0);
+    nextKeyframe.set(50, 0);
 }
 
 void NimbleFunscript::start()
 {
     startTime = millis();
     running = true;
+}
+
+void NimbleFunscript::stop()
+{
+    running = false;
+    vibrationAmplitude = 0;
 }
 
 void NimbleFunscript::initFunscriptFile(fs::FS &fs, const char *path)
@@ -100,38 +130,44 @@ void NimbleFunscript::initFunscriptFile(fs::FS &fs, const char *path)
         Serial.println("- failed to find Funscript actions");
         return;
     }
+    endOfActions = false;
 }
 
 void NimbleFunscript::processFunscriptFile()
 {
-    if (posBuffer.isFull()) return;
+    if (keyBuffer.isFull()) return;
     if (endOfActions || !currentFile.available()) return;
 
     do {
         DeserializationError error = deserializeJson(actionJson, currentFile, DeserializationOption::Filter(jsonFilter));
         if (error == DeserializationError::Ok) {
             //serializeJsonPretty(actionJson, Serial);
-            posBuffer.push(actionJson["pos"].as<short>());
-            atBuffer.push(actionJson["at"].as<int>());
+            keyBuffer.push(new Keyframe(
+                actionJson["at"].as<int>(),
+                actionJson["pos"].as<short>()
+            ));
         } else if (error != DeserializationError::EmptyInput) {
             Serial.println(error.f_str());
             return;
         }
         endOfActions = !currentFile.findUntil(",", "]");
-    } while (!endOfActions && !posBuffer.isFull());
+    } while (!endOfActions && !keyBuffer.isFull());
 }
 
 void NimbleFunscript::interpolate()
 {
     long now = millis() - startTime;
-    if (now >= nextKeyframe.at && !posBuffer.isEmpty()) {
-        currentKeyframe.at = nextKeyframe.at;
-        currentKeyframe.pos = nextKeyframe.pos;
-        nextKeyframe.at = atBuffer.shift();
-        nextKeyframe.pos = posBuffer.shift();
+    if (now >= nextKeyframe.at() && !keyBuffer.isEmpty()) {
+        currentKeyframe.copy(nextKeyframe);
+        Keyframe* kf = keyBuffer.shift();
+        nextKeyframe.set(kf->at(), kf->pos());
+        delete kf;
     }
-    short lerp = map(now, currentKeyframe.at, nextKeyframe.at, currentKeyframe.pos, nextKeyframe.pos);
-    frame.targetPos = map(lerp, 0, 100, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS);
+    if (now <= nextKeyframe.at() && !currentKeyframe.equal(nextKeyframe)) {
+        short lerp = currentKeyframe.lerpToPos(now, nextKeyframe);
+        //Serial.printf("lerp = %d\n", lerp);
+        frame.targetPos = map(lerp, 0, 100, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS);
+    }
 }
 
 void NimbleFunscript::handlePositionChanges()
