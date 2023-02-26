@@ -32,7 +32,7 @@ class Keyframe {
         short lerpToPos(int t, Keyframe k) {
             return map(t, at(), k.at(), pos(), k.pos());
         }
-        bool equal(Keyframe k) {
+        bool equals(Keyframe k) {
             return (at() == k.at() || pos() == k.pos());
         }
 
@@ -60,22 +60,26 @@ class NimbleFunscript {
         void updateActuator();
         void updateEncoderLEDs(bool isOn = true);
         void updateHardwareLEDs();
-        void updateNetworkLEDs(uint32_t bluetooth, uint32_t wifi);
+        void updateNetworkLEDs(uint32_t bluetooth = 0, uint32_t wifi = 0);
         void setVibrationSpeed(float v) { vibrationSpeed = min(max(v, (float)0), (float)VIBRATION_MAX_SPEED); }
         void setVibrationAmplitude(uint16_t v) { vibrationAmplitude = min(max(v, (uint16_t)0), (uint16_t)VIBRATION_MAX_AMP); }
         void printFrameState(Print& out = Serial);
 
     private:
+        static const int START_OFFSET = 1000; // 1 sec to allow transition at start
+
         File currentFile;
         bool running = false;
+        bool started = false;
         bool endOfActions = false;
         float vibrationSpeed = VIBRATION_MAX_SPEED; // hz
         uint16_t vibrationAmplitude = 0; // amplitude in position units (0 to 25)
         nimbleFrameState frame;
         Keyframe currentKeyframe;
         Keyframe nextKeyframe;
-        CircularBuffer<Keyframe*, 100> keyBuffer;
+        CircularBuffer<Keyframe*, 32> keyBuffer;
         long startTime;
+        long stopTime;
 
         StaticJsonDocument<64> jsonFilter;
         StaticJsonDocument<64> actionJson;
@@ -83,43 +87,54 @@ class NimbleFunscript {
         void reset();
         int16_t clampPositionDelta();
         void processFunscriptFile();
-        void interpolate();
+        void lerpKeyframes();
         void handlePositionChanges();
 };
 
 void NimbleFunscript::init()
 {
     initNimbleConModule();
-    currentKeyframe.set(50, 0);
-    nextKeyframe.set(50, 0);
 }
 
 void NimbleFunscript::reset()
 {
     currentFile.close();
     keyBuffer.clear();
-    endOfActions = true;
+    running = false;
+    started = true;
+    endOfActions = false;
     vibrationAmplitude = 0;
-    currentKeyframe.set(50, 0);
-    nextKeyframe.set(50, 0);
+    stopTime = 0;
+
+    // Always restart and transition from current position
+    short tmpCurPos = map(frame.position, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS, 0, 100);
+    currentKeyframe.set(0, tmpCurPos);
+    nextKeyframe.set(0, tmpCurPos);
 }
 
 void NimbleFunscript::start()
 {
-    startTime = millis();
     running = true;
+    if (stopTime > 0) {
+        if (!started) {
+            // readjust start time to account for stopped time
+            long pauseTime = millis() - stopTime;
+            startTime += pauseTime;
+        }
+        stopTime = 0;
+    }
 }
 
 void NimbleFunscript::stop()
 {
     running = false;
-    vibrationAmplitude = 0;
+    stopTime = millis();
 }
 
 void NimbleFunscript::initFunscriptFile(fs::FS &fs, const char *path)
 {
     reset();
-    Serial.printf("Reading file: %s\n", path);
+    Serial.printf("Playing file: %s\n", path);
     currentFile = fs.open(path);
     if (!currentFile || currentFile.isDirectory())
     {
@@ -130,11 +145,15 @@ void NimbleFunscript::initFunscriptFile(fs::FS &fs, const char *path)
         Serial.println("- failed to find Funscript actions");
         return;
     }
-    endOfActions = false;
 }
 
+/**
+ * Fill the buffer with the next actions in the file.
+ * Called during loop.
+ */
 void NimbleFunscript::processFunscriptFile()
 {
+    if (!running) return;
     if (keyBuffer.isFull()) return;
     if (endOfActions || !currentFile.available()) return;
 
@@ -143,7 +162,7 @@ void NimbleFunscript::processFunscriptFile()
         if (error == DeserializationError::Ok) {
             //serializeJsonPretty(actionJson, Serial);
             keyBuffer.push(new Keyframe(
-                actionJson["at"].as<int>(),
+                actionJson["at"].as<int>() + START_OFFSET,
                 actionJson["pos"].as<short>()
             ));
         } else if (error != DeserializationError::EmptyInput) {
@@ -152,26 +171,48 @@ void NimbleFunscript::processFunscriptFile()
         }
         endOfActions = !currentFile.findUntil(",", "]");
     } while (!endOfActions && !keyBuffer.isFull());
+
+    // Don't start playing until after buffer initially filled
+    if (started) {
+        started = false;
+        startTime = millis();
+    }
 }
 
-void NimbleFunscript::interpolate()
+void NimbleFunscript::lerpKeyframes()
 {
+    if (!running) return;
+    if (started) return; // Don't start playing until initially loaded
+
     long now = millis() - startTime;
+
+    // Shift keyframes and pull next action off buffer when time exceeded
     if (now >= nextKeyframe.at() && !keyBuffer.isEmpty()) {
         currentKeyframe.copy(nextKeyframe);
         Keyframe* kf = keyBuffer.shift();
         nextKeyframe.set(kf->at(), kf->pos());
         delete kf;
+        // Serial.printf("KF %08d:%03d -> %08d:%03d\n",
+        //     currentKeyframe.at(), currentKeyframe.pos(),
+        //     nextKeyframe.at(), nextKeyframe.pos()
+        // );
     }
-    if (now <= nextKeyframe.at() && !currentKeyframe.equal(nextKeyframe)) {
-        short lerp = currentKeyframe.lerpToPos(now, nextKeyframe);
-        //Serial.printf("lerp = %d\n", lerp);
-        frame.targetPos = map(lerp, 0, 100, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS);
-    }
+
+    // Skip duplicate keyframes
+    if (currentKeyframe.equals(nextKeyframe)) return;
+
+    // Skip if at end
+    if (now > nextKeyframe.at()) return;
+
+    // Interpolate position betweeen keyframes for the current time
+    short lerp = currentKeyframe.lerpToPos(now, nextKeyframe);
+    frame.targetPos = map(lerp, 0, 100, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS);
+    //Serial.printf("lerp = %d\n", lerp);
 }
 
 void NimbleFunscript::handlePositionChanges()
 {
+    if (!running) return;
     if (vibrationAmplitude > 0 && vibrationSpeed > 0) {
         int vibSpeedMillis = 1000 / vibrationSpeed;
         int vibModMillis = millis() % vibSpeedMillis;
@@ -200,7 +241,7 @@ void NimbleFunscript::updateActuator()
 {
     // Update interpolations
     processFunscriptFile();
-    interpolate();
+    lerpKeyframes();
     handlePositionChanges();
 
     // Send packet of values to the actuator when time is ready
@@ -237,6 +278,9 @@ void NimbleFunscript::updateActuator()
     }
 }
 
+/**
+ * Failsafe to limit position changes between frames to a maximum delta
+ */
 int16_t NimbleFunscript::clampPositionDelta()
 {
     int16_t delta = frame.position - frame.lastPos;

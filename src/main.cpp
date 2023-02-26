@@ -18,25 +18,28 @@ void updateLEDs()
 
     nimble.updateEncoderLEDs();
     nimble.updateHardwareLEDs();
-    nimble.updateNetworkLEDs(0, 0);
+    //nimble.updateNetworkLEDs();
 }
 
 const char* filenames[] = {
     "/1-slowbj-7m.funscript",
+    "/7-crazy-10m.funscript",
     "/2-strokes-20m.funscript",
     "/3-smooth-20m.funscript",
     "/4-intense-20m.funscript",
     "/5-invert-20m.funscript",
     "/6-topbot-20m.funscript"
 };
-
+short numFilenames = sizeof(filenames) / sizeof(const char*);
 short fileIndex = 0;
+
 const char* nextFile() {
     short i = fileIndex;
     fileIndex++;
-    if (fileIndex >= sizeof(filenames)) {
+    if (fileIndex >= numFilenames) {
         fileIndex = 0;
     }
+    //Serial.printf("File index: %d, Next: %d, Size: %d\n", i, fileIndex, numFilenames);
     return filenames[i];
 }
 
@@ -48,10 +51,13 @@ void pressHandler(BfButton *btn, BfButton::press_pattern_t pattern)
         nimble.stop();
         break;
 
-    case BfButton::SINGLE_PRESS:
-        nimble.stop();
+    case BfButton::DOUBLE_PRESS:
         nimble.initFunscriptFile(SPIFFS, nextFile());
         nimble.start();
+        break;
+
+    case BfButton::SINGLE_PRESS:
+        nimble.toggle();
         break;
     }
 }
@@ -65,8 +71,12 @@ void setup()
         Serial.println("An error occurred while mounting SPIFFS");
     }
     listDir(SPIFFS, "/", 0);
+    Serial.println("Ready.");
 
-    btn.onPress(pressHandler).onPressFor(pressHandler, 2000);
+    btn.onPress(pressHandler)
+        .onDoublePress(pressHandler)
+        .onPressFor(pressHandler, 2000);
+
     ledUpdateDelay.start(30);
 }
 
