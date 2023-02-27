@@ -3,7 +3,6 @@
 #include <BfButton.h>
 #include <millisDelay.h>
 #include "NimbleFunscript.h"
-#include "fsUtils.h"
 
 NimbleFunscript nimble;
 
