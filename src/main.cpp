@@ -50,6 +50,7 @@ void sortFilenames()
 }
 
 void getFunscriptFiles(fs::FS &fs) {
+    numFiles = 0;
     Serial.println("Listing dir: /");
     File root = fs.open("/");
     if (!root) {

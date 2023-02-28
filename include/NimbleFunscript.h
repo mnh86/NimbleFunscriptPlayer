@@ -105,6 +105,7 @@ void NimbleFunscript::reset()
     endOfActions = false;
     vibrationAmplitude = 0;
     stopTime = 0;
+    frame.force = MAX_FORCE;
 
     // Always restart and transition from current position
     short tmpCurPos = map(frame.position, -ACTUATOR_MAX_POS, ACTUATOR_MAX_POS, 0, 100);
@@ -115,6 +116,7 @@ void NimbleFunscript::reset()
 void NimbleFunscript::start()
 {
     running = true;
+
     if (stopTime > 0) {
         if (!started) {
             // readjust start time to account for stopped time
